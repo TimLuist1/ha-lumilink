@@ -63,12 +63,14 @@ class LumiLinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         # Gather already-discovered LumiLink devices from HA's BT scanner
+        # Match by service UUID *or* by device name prefix (LUMILINK-...)
         current_addresses = self._async_current_ids()
         for info in async_discovered_service_info(self.hass, connectable=True):
             if info.address in current_addresses:
                 continue
             uuids = [u.lower() for u in (info.service_uuids or [])]
-            if SERVICE_UUID.lower() in uuids:
+            name_matches = (info.name or "").upper().startswith("LUMILINK")
+            if SERVICE_UUID.lower() in uuids or name_matches:
                 self._discovered_devices[info.address] = (
                     info.name or f"LumiLink {info.address[-5:]}"
                 )

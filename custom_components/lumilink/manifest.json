@@ -11,6 +11,7 @@
   "codeowners": ["@TimLuist1"],
   "iot_class": "local_push",
   "bluetooth": [
-    {"service_uuid": "bc3b4e71-ee54-4f09-8f28-e865150c20b0"}
+    {"service_uuid": "bc3b4e71-ee54-4f09-8f28-e865150c20b0"},
+    {"local_name": "LUMILINK-*"}
   ]
 }
