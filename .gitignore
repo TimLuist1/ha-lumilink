@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Unit test / coverage reports
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets
+secrets.yaml

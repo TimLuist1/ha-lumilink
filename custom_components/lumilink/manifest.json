@@ -1,0 +1,16 @@
+{
+  "domain": "lumilink",
+  "name": "LumiLink Pool Light",
+  "version": "1.0.0",
+  "config_flow": true,
+  "integration_type": "device",
+  "documentation": "https://github.com/TimLuist1/ha-lumilink",
+  "issue_tracker": "https://github.com/TimLuist1/ha-lumilink/issues",
+  "requirements": [],
+  "dependencies": ["bluetooth"],
+  "codeowners": ["@TimLuist1"],
+  "iot_class": "local_push",
+  "bluetooth": [
+    {"service_uuid": "bc3b4e71-ee54-4f09-8f28-e865150c20b0"}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "LumiLink Pool Light",
+        "description": "Select a nearby LumiLink device or enter its Bluetooth address manually.",
+        "data": {
+          "address": "Bluetooth Address"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "LumiLink found",
+        "description": "Do you want to add **{name}** to Home Assistant?"
+      }
+    },
+    "error": {
+      "no_devices_found": "No LumiLink devices found nearby. Enter the Bluetooth address manually."
+    },
+    "abort": {
+      "already_configured": "This LumiLink device is already configured.",
+      "no_devices_found": "No LumiLink devices could be found."
+    }
+  }
+}
