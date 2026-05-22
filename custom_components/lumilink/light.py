@@ -112,11 +112,13 @@ class LumiLinkLight(LightEntity):
 
     async def _connect(self) -> None:
         async with self._connect_lock:
+            if self._client and self._client.is_connected:
+                return
             try:
                 from homeassistant.components.bluetooth import (
                     async_ble_device_from_address,
                 )
-                from bleak import BleakClient
+                from bleak_retry_connector import establish_connection, BleakClient
 
                 ble_device = async_ble_device_from_address(
                     self.hass, self._address, connectable=True
@@ -128,11 +130,13 @@ class LumiLinkLight(LightEntity):
                     self._schedule_reconnect()
                     return
 
-                self._client = BleakClient(
+                self._client = await establish_connection(
+                    BleakClient,
                     ble_device,
+                    self._address,
                     disconnected_callback=self._on_disconnect,
+                    max_attempts=3,
                 )
-                await self._client.connect(timeout=15.0)
 
                 if not self._client.is_connected:
                     _LOGGER.warning("LumiLink %s: connect() returned False", self._address)
@@ -174,6 +178,9 @@ class LumiLinkLight(LightEntity):
         self._reconnect_task = self.hass.async_create_task(_delayed_connect())
 
     async def _disconnect(self) -> None:
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
         client = self._client
         self._client = None
         self._available = False
