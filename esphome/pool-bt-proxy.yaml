@@ -1,0 +1,57 @@
+substitutions:
+  name: pool-bt-proxy
+  friendly_name: Pool BT Proxy
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+  min_version: 2024.6.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# WLAN – HIER anpassen
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  ap:
+    ssid: "Pool BT Proxy Fallback"
+    password: "lumilink123"
+
+captive_portal:
+
+# API für Home Assistant (Auto-Discovery)
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+# Das ist der wichtige Teil: Bluetooth-Proxy
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+bluetooth_proxy:
+  active: true
+
+# Optional: Status-LED + Neustart-Schalter
+button:
+  - platform: restart
+    name: "Neustart"
+
+sensor:
+  - platform: wifi_signal
+    name: "WLAN-Signal"
+    update_interval: 60s

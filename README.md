@@ -8,14 +8,19 @@ Control your **SEAMAID LumiLink** Bluetooth pool lights directly from Home Assis
 ## Features
 
 - Turn pool lights on/off
-- 16 colour effects (Warm White, Cold White, Red, Blue, Green, Cyan, Magenta, Yellow, Orange, Purple, Pink, RGB Cycle, Colour Cycle, Flash, Strobe, Fade)
-- Auto-discovery via Bluetooth LE
+- 16 colour effects / modes — 11 fixed colours (White, Blue, Cyan, Turquoise,
+  Magenta, Green, Orange, Yellow, Amber, Red, Pink) + 5 automatic modes
+  (Slow, Medium, Fast, Flash, Strobe)
+- Auto-discovery via Bluetooth LE (service UUID + `LUMILINK-*` name)
+- Works through an ESPHome Bluetooth proxy for long range
 - German + English UI
 
 ## Requirements
 
-- Home Assistant ≥ 2023.9 with Bluetooth integration enabled
-- SEAMAID LumiLink BLE module (`LUMILINK-*`)
+- Home Assistant ≥ 2024.10 with the Bluetooth integration enabled
+- SEAMAID LumiLink BLE module (`LUMILINK-*`, model 504017)
+- A Bluetooth adapter on the HA host **or** an ESPHome Bluetooth proxy in range
+  (see [`esphome/pool-bt-proxy.yaml`](esphome/pool-bt-proxy.yaml))
 - Lights must be powered on during setup
 
 ---
@@ -53,9 +58,28 @@ After adding the integration a **light entity** is created. You can:
 
 ## Troubleshooting
 
-- **Not discovered?** Make sure lights are powered on and within ~5 m of your HA host.
-- **Connection drops?** Power-cycle both lights simultaneously so they stay in sync.
-- **Wrong colour after power-cycle?** Use the **Reset** effect to jump back to warm white.
+- **Shows up but stays "unavailable" / won't connect?** The module only accepts
+  **new** connections during the **first 3 minutes after power-on** (a security
+  feature of the SEAMAID firmware). If HA didn't connect in that window,
+  **switch the module's power off for ~15 seconds and on again**, then let HA
+  reconnect. Once connected, HA keeps the link open.
+- **Not discovered at all?** Make sure the lights are powered on and within range
+  of a Bluetooth adapter or ESPHome proxy. The ESP32 proxy near the pool is the
+  most reliable option (the module is IP67 and often far from the HA host).
+- **Toggle does nothing?** Enable debug logging (below) and check for `BUSY` /
+  `ERROR` notifications — the module silently ignores commands until it reports
+  the matching availability bit, which the integration now waits for.
+- **Lamps out of sync (two lamps on one output)?** Power-cycle both lamps
+  simultaneously, then select the **Weiß / White** effect (RESET) to realign.
+
+### Debug logging
+
+```yaml
+logger:
+  logs:
+    custom_components.lumilink: debug
+    bleak_retry_connector: debug
+```
 
 ---
 

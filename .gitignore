@@ -21,3 +21,7 @@ htmlcov/
 
 # Secrets
 secrets.yaml
+
+# Reverse-engineering / chat artifacts (never ship in the integration)
+chat.json
+*copilot*chat*.json
