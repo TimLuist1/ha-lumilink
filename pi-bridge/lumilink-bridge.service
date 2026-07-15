@@ -1,0 +1,16 @@
+[Unit]
+Description=LumiLink BLE-MQTT bridge
+After=bluetooth.target network-online.target
+Wants=network-online.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/opt/lumilink-bridge/venv/bin/python /opt/lumilink-bridge/lumilink_bridge.py /etc/lumilink-bridge/config.yaml
+Restart=always
+RestartSec=8
+User=root
+Environment=LUMILINK_LOG=INFO
+
+[Install]
+WantedBy=multi-user.target

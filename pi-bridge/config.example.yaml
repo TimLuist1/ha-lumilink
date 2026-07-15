@@ -1,0 +1,35 @@
+# LumiLink Pi bridge configuration.
+# Copy to /etc/lumilink-bridge/config.yaml and edit.
+
+# --- The LumiLink module ---
+# Leave 'address' empty to auto-find by name prefix (recommended on the Pi,
+# which sits right next to the module). Or set the BLE MAC explicitly.
+address: ""                 # e.g. "48:31:B7:75:8D:5A" or "" to scan
+name_prefix: "LUMILINK"     # scans for a device whose name contains this
+
+# --- Behaviour ---
+sync_mode: true             # reset both lamps to white before each colour (keeps them in sync)
+step_delay: 1.5             # seconds between colour steps (>=1.0 recommended)
+power_off_seconds: 15       # how long to cut power during a power-cycle
+
+# --- MQTT (Home Assistant's Mosquitto broker) ---
+mqtt:
+  host: "192.168.0.105"     # your HA / Mosquitto IP
+  port: 1883
+  username: "REPLACE_ME"    # an MQTT user (see README)
+  password: "REPLACE_ME"
+
+# Entity/device naming in HA
+node_id: "lumilink_pool"
+device_name: "LumiLink Pool Light"
+discovery_prefix: "homeassistant"
+
+# --- Self-healing power-cycle via Home Assistant ---
+# The module only accepts NEW connections for ~3 min after power-on. When the
+# bridge needs to (re)connect, it cuts power via this Meross plug, then grabs
+# the connection in the fresh window. Leave 'token' empty to disable (you then
+# power-cycle manually when the bridge asks).
+home_assistant:
+  url: "http://192.168.0.105:8123"
+  token: "REPLACE_WITH_LONG_LIVED_TOKEN"
+  switch_entity: "switch.smart_switch_20040842031109251h3748e1e9197c79_outlet"
