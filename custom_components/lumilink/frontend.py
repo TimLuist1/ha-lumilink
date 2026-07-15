@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.integration_platform import async_process_integration_platforms
 
 from .const import CARD_FILENAME, CARD_URL, DOMAIN
 
@@ -23,7 +22,6 @@ async def async_register_card(hass: HomeAssistant) -> None:
     """
     if hass.data.get(_REGISTERED):
         return
-    hass.data[_REGISTERED] = True
 
     from homeassistant.components.frontend import add_extra_js_url
     from homeassistant.components.http import StaticPathConfig
@@ -47,5 +45,17 @@ async def async_register_card(hass: HomeAssistant) -> None:
         # Path already registered (e.g. a second config entry) – harmless.
         _LOGGER.debug("LumiLink card static path already registered: %s", exc)
 
+    # Inject the module so every dashboard loads it (needs a browser reload to
+    # take effect on already-open pages).
     add_extra_js_url(hass, f"{CARD_URL}?v={version}")
-    _LOGGER.info("LumiLink Lovelace card registered at %s (v%s)", CARD_URL, version)
+
+    # Only mark as done once we've actually served + injected it, so a failed
+    # attempt can retry on the next reload instead of being skipped forever.
+    hass.data[_REGISTERED] = True
+    _LOGGER.info(
+        "LumiLink Lovelace card registered at %s?v=%s (serving %s). "
+        "Hard-refresh the browser if the card shows a loading spinner.",
+        CARD_URL,
+        version,
+        card_path,
+    )
