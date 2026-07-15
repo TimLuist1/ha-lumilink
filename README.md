@@ -7,17 +7,22 @@ Control your **SEAMAID LumiLink** Bluetooth pool lights directly from Home Assis
 
 ## Features
 
-- Turn pool lights on/off
+- Turn pool lights on/off — with **real state read-back** from the module
 - 16 colour effects / modes — 11 fixed colours (White, Blue, Cyan, Turquoise,
   Magenta, Green, Orange, Yellow, Amber, Red, Pink) + 5 automatic modes
   (Slow, Medium, Fast, Flash, Strobe)
+- **Lamp sync**: a dedicated *Sync lamps* button (same as the remote's
+  "Synchron" button) plus an optional sync mode that anchors every colour
+  change with a reset, so lamps wired in parallel stay perfectly in sync
+- Configurable pulse timing (Options), instant reconnect the moment the
+  module is seen advertising, diagnostics download
 - Auto-discovery via Bluetooth LE (service UUID + `LUMILINK-*` name)
 - Works through an ESPHome Bluetooth proxy for long range
 - German + English UI
 
 ## Requirements
 
-- Home Assistant ≥ 2024.10 with the Bluetooth integration enabled
+- Home Assistant ≥ 2024.12 with the Bluetooth integration enabled
 - SEAMAID LumiLink BLE module (`LUMILINK-*`, model 504017)
 - A Bluetooth adapter on the HA host **or** an ESPHome Bluetooth proxy in range
   (see [`esphome/pool-bt-proxy.yaml`](esphome/pool-bt-proxy.yaml))
@@ -48,13 +53,42 @@ The integration supports automatic Bluetooth discovery. When your LumiLink light
 
 ## Usage
 
-After adding the integration a **light entity** is created. You can:
+After adding the integration you get, on one device:
+
+- a **light entity** (on/off + 16 effects), and
+- a **`Sync lamps` button** — the same function as the remote's *Synchro* key:
+  resets both lamps so they line up again.
 
 | Action | How |
 |--------|-----|
 | Turn on/off | Standard HA light toggle |
-| Change colour | Set **Effect** in the light card |
-| Reset sequence | Select effect **Reset / Warm White** |
+| Change colour | Set **Effect** in the light card (11 colours + 5 auto modes) |
+| Re-sync two lamps | Press the **Sync lamps** button (or the card's Sync button) |
+| Tune sync timing | Integration → **Configure** (sync mode + pulse delay) |
+
+### LumiLink Card (bundled)
+
+The integration ships a custom Lovelace card that shows the pool lamp
+illuminating live in the selected colour, with on/off, all 16 colours/modes
+and a sync button. It's **served automatically** — no manual resource setup.
+
+1. Edit a dashboard → **Add card** → search **“LumiLink Card”** (it has a live
+   preview), or add it in YAML:
+
+```yaml
+type: custom:lumilink-card
+entity: light.lumilink_pool_light
+sync_entity: button.lumilink_pool_light_sync_lamps   # optional
+name: Pool
+```
+
+2. The card is fully **resizable** in the new sections view (drag in the
+   Layout tab). After updating the integration, **hard-refresh** the browser
+   (Ctrl/Cmd-Shift-R) once so the new card version loads.
+
+> Why colours only cycle: the module has no "set colour X" command — the app
+> and remote only step to the *next* colour. The integration steps for you and,
+> in **sync mode**, resets first so both parallel-wired lamps stay identical.
 
 ## Troubleshooting
 

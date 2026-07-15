@@ -20,5 +20,24 @@
       "already_configured": "Dieses LumiLink-Gerät ist bereits konfiguriert.",
       "no_devices_found": "Kein LumiLink-Gerät gefunden."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "LumiLink-Optionen",
+        "description": "Lampen-Synchronisation. Der Sync-Modus ankert jede Farbwahl mit einem Reset (beide Lampen landen gemeinsam auf Weiß) und steppt dann langsam zur Zielfarbe – so bleiben parallel verdrahtete Lampen synchron.",
+        "data": {
+          "sync_mode": "Sync-Modus (Reset vor jedem Farbwechsel)",
+          "step_delay": "Pause zwischen Farbschritten (Sekunden)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "sync_lamps": {
+        "name": "Lampen synchronisieren"
+      }
+    }
   }
 }

@@ -7,9 +7,19 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import CONF_ADDRESS, CONF_NAME, DOMAIN, SERVICE_UUID
+from .const import (
+    CONF_ADDRESS,
+    CONF_NAME,
+    CONF_STEP_DELAY,
+    CONF_SYNC_MODE,
+    DEFAULT_STEP_DELAY,
+    DEFAULT_SYNC_MODE,
+    DOMAIN,
+    SERVICE_UUID,
+)
 
 
 class LumiLinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -20,6 +30,13 @@ class LumiLinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, str] = {}  # address → name
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> LumiLinkOptionsFlow:
+        return LumiLinkOptionsFlow()
 
     # ── Automatic Bluetooth discovery ────────────────────────────────────────
 
@@ -108,3 +125,26 @@ class LumiLinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors,
         )
+
+
+class LumiLinkOptionsFlow(config_entries.OptionsFlow):
+    """Options: lamp-sync behaviour and pulse timing."""
+
+    async def async_step_init(self, user_input: dict | None = None) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        options = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_SYNC_MODE,
+                    default=options.get(CONF_SYNC_MODE, DEFAULT_SYNC_MODE),
+                ): bool,
+                vol.Optional(
+                    CONF_STEP_DELAY,
+                    default=options.get(CONF_STEP_DELAY, DEFAULT_STEP_DELAY),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.3, max=5.0)),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)

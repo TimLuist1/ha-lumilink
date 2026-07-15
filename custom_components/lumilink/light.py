@@ -5,6 +5,16 @@ desktop controller (lumilink_ble.py) of the original SEAMAID LumiLink app
 (com.alphadif.seamaid.lumilink). The transport is adapted to Home Assistant's
 Bluetooth stack (bleak_retry_connector / habluetooth) for BlueZ + ESPHome
 proxy reliability.
+
+Lamp-sync design (hardware-verified findings):
+- Both lamps are wired in parallel on OUTPUT 1 of one module; param 0x02 was
+  live-tested and rejected by the firmware (ERROR NOT_FOUND) — there is no
+  second addressable output.
+- After RESET both lamps land on white (index 0) IN SYNC.
+- Desync happens when NEXT pulses are sent too fast: one lamp occasionally
+  misses a pulse. The original app only has a manual next-colour button
+  (human pace) and never desyncs. Hence: slow, gated stepping + RESET as the
+  sync anchor before every colour selection (sync mode, default on).
 """
 from __future__ import annotations
 
@@ -33,7 +43,12 @@ from .const import (
     COLOR_NAMES,
     CONF_ADDRESS,
     CONF_NAME,
+    CONF_STEP_DELAY,
+    CONF_SYNC_MODE,
+    DEFAULT_STEP_DELAY,
+    DEFAULT_SYNC_MODE,
     DOMAIN,
+    LIGHT_STATE_BIT,
     PARAM_OUTPUT_1,
     VALUE_LIGHT_OFF,
     VALUE_LIGHT_ON,
@@ -52,10 +67,16 @@ BUSY_BIT_RESET = 0x08
 
 _LOGGER = logging.getLogger(__name__)
 
+# Entities are push-based and all writes are serialized by an internal lock.
+PARALLEL_UPDATES = 0
+
 RECONNECT_DELAY = 15  # seconds between reconnect attempts
 CONNECT_MAX_ATTEMPTS = 6
 WRITE_TIMEOUT = 6.0  # seconds per GATT write
 NUM_FIXED_COLORS = 11  # indices 0..10 are static colours; 11..15 are auto modes
+# The reset animation (~4 s double-blink) is worth roughly this many NEXT
+# steps of time; in fast mode only take the reset shortcut when it saves more.
+RESET_STEP_COST = 3
 
 
 async def async_setup_entry(
@@ -65,7 +86,10 @@ async def async_setup_entry(
 ) -> None:
     address = entry.data[CONF_ADDRESS]
     name = entry.data.get(CONF_NAME, f"LumiLink {address[-5:]}")
-    async_add_entities([LumiLinkLight(hass, address, name, entry.entry_id)])
+    entity = LumiLinkLight(hass, entry, address, name)
+    # Make the entity reachable for sibling platforms (button: "sync lamps").
+    entry.runtime_data.light = entity
+    async_add_entities([entity])
 
 
 def _pkt(cmd: int, param: int, value: int = 0) -> bytes:
@@ -83,16 +107,21 @@ class LumiLinkLight(LightEntity):
     _attr_supported_features = LightEntityFeature.EFFECT
     _attr_effect_list = COLOR_NAMES
     _attr_should_poll = False
-    # The module has no readable on/off state characteristic – state is tracked
-    # optimistically from the commands we send, so it is an assumed state.
+    # Until the first successful state read-back proves CHAR_COMMAND is
+    # readable on this firmware, the on/off state is assumed from commands.
     _attr_assumed_state = True
+    # Diagnostic attributes churn on every BUSY notification – keep them out
+    # of the recorder database.
+    _unrecorded_attributes = frozenset(
+        {"busy_status", "last_error", "sync_mode", "step_delay"}
+    )
 
     def __init__(
-        self, hass: HomeAssistant, address: str, name: str, entry_id: str
+        self, hass: HomeAssistant, entry: ConfigEntry, address: str, name: str
     ) -> None:
         self.hass = hass
+        self._entry = entry
         self._address = address
-        self._entry_id = entry_id
         safe_addr = address.replace(":", "_").replace("-", "_")
         self._attr_unique_id = f"lumilink_{safe_addr}"
         self._attr_device_info = DeviceInfo(
@@ -109,12 +138,35 @@ class LumiLinkLight(LightEntity):
         self._cmd_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task | None = None
+        self._transition_task: asyncio.Task | None = None
+        self._connect_tasks: set[asyncio.Task] = set()
         self._busy_status: int | None = None
+        self._busy_update_count: int = 0
         self._notifications_active: bool = False
         self._last_error: bytes | None = None
         self._closing: bool = False
-        # Cached write-response preference per characteristic (auto-detected once).
+        # Cancellation token: bumped whenever a new command supersedes a
+        # running colour transition (same pattern as the desktop controller).
+        self._cmd_token: int = 0
+        # Cached write-response preference per characteristic (auto-detected).
         self._write_with_response: dict[str, bool] = {}
+
+    # ── Options ──────────────────────────────────────────────────────────────
+
+    @property
+    def _step_delay(self) -> float:
+        """Pause between NEXT pulses so both lamps register every pulse."""
+        try:
+            return float(
+                self._entry.options.get(CONF_STEP_DELAY, DEFAULT_STEP_DELAY)
+            )
+        except (TypeError, ValueError):
+            return DEFAULT_STEP_DELAY
+
+    @property
+    def _sync_mode(self) -> bool:
+        """Anchor every colour selection with a RESET (keeps lamps in sync)."""
+        return bool(self._entry.options.get(CONF_SYNC_MODE, DEFAULT_SYNC_MODE))
 
     # ── Properties ───────────────────────────────────────────────────────────
 
@@ -134,7 +186,10 @@ class LumiLinkLight(LightEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        attrs: dict[str, Any] = {}
+        attrs: dict[str, Any] = {
+            "sync_mode": self._sync_mode,
+            "step_delay": self._step_delay,
+        }
         if self._busy_status is not None:
             attrs["busy_status"] = f"0x{self._busy_status:02x}"
         if self._last_error is not None:
@@ -144,12 +199,57 @@ class LumiLinkLight(LightEntity):
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def async_added_to_hass(self) -> None:
-        self.hass.async_create_task(self._connect())
+        # Presence-triggered connect: the module only accepts NEW centrals for
+        # 3 minutes after power-on, so reconnect the instant HA sees an
+        # advertisement instead of waiting for the periodic retry.
+        from homeassistant.components.bluetooth import (
+            BluetoothCallbackMatcher,
+            BluetoothScanningMode,
+            async_register_callback,
+        )
+
+        self.async_on_remove(
+            async_register_callback(
+                self.hass,
+                self._on_bluetooth_advertisement,
+                BluetoothCallbackMatcher(address=self._address, connectable=True),
+                BluetoothScanningMode.ACTIVE,
+            )
+        )
+        self._spawn_connect()
+
+    def _spawn_connect(self) -> None:
+        """Start a tracked _connect() background task (cancellable on removal)."""
+        if self._closing:
+            return
+        task = self.hass.async_create_background_task(
+            self._connect(), name=f"lumilink_connect_{self._address}"
+        )
+        self._connect_tasks.add(task)
+        task.add_done_callback(self._connect_tasks.discard)
+
+    @callback
+    def _on_bluetooth_advertisement(self, _service_info: Any, _change: Any) -> None:
+        """Advertisement seen – connect right away if we aren't connected."""
+        if self._closing or (self._client and self._client.is_connected):
+            return
+        if self._connect_lock.locked():
+            return  # a connect attempt is already in flight
+        _LOGGER.debug(
+            "LumiLink %s: advertisement seen – connecting now", self._address
+        )
+        self._spawn_connect()
 
     async def async_will_remove_from_hass(self) -> None:
         self._closing = True
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
+        self._cmd_token += 1  # abort any running colour transition
+        for task in (
+            self._reconnect_task,
+            self._transition_task,
+            *list(self._connect_tasks),
+        ):
+            if task and not task.done():
+                task.cancel()
         await self._disconnect()
 
     # ── BLE connection management ─────────────────────────────────────────────
@@ -208,6 +308,14 @@ class LumiLinkLight(LightEntity):
                     ble_device_callback=self._get_ble_device,
                 )
 
+                # The entity may have been removed while establish_connection
+                # was awaiting (it can take several seconds). Don't touch state
+                # or keep the link – tear it down so we don't orphan a BLE
+                # connection that would occupy the module's 3-minute slot.
+                if self._closing:
+                    await self._disconnect()
+                    return
+
                 if not self._client.is_connected:
                     _LOGGER.warning(
                         "LumiLink %s: connect() returned False", self._address
@@ -254,6 +362,9 @@ class LumiLinkLight(LightEntity):
                     )
 
                 self._available = True
+                # Sync the real on/off state from the module (CHAR_COMMAND is
+                # readable: bit 4 = light on). Best-effort.
+                await self._refresh_light_state()
                 self.async_write_ha_state()
 
             except Exception as exc:  # noqa: BLE001
@@ -271,6 +382,7 @@ class LumiLinkLight(LightEntity):
         if not data:
             return
         self._busy_status = data[0]
+        self._busy_update_count += 1
         _LOGGER.debug(
             "LumiLink %s BUSY=0x%02x (busy=%s light=%s next=%s reset=%s)",
             self._address,
@@ -288,6 +400,21 @@ class LumiLinkLight(LightEntity):
             return
         self._last_error = bytes(data)
         _LOGGER.warning("LumiLink %s ERROR notify: %s", self._address, data.hex())
+
+    async def _wait_for_new_busy_notification(self, max_wait: float = 2.0) -> None:
+        """Wait until a fresh BUSY notification arrives (post-command settle).
+
+        Prevents racing on a stale cached status right after a write.
+        """
+        if not self._notifications_active:
+            return
+        start_count = self._busy_update_count
+        deadline = self.hass.loop.time() + max_wait
+        while self._busy_update_count == start_count:
+            remaining = deadline - self.hass.loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
 
     async def _wait_for_feature(self, bit: int, max_tries: int = 10) -> bool:
         """Block until the BUSY byte has *bit* set, or give up.
@@ -327,8 +454,12 @@ class LumiLinkLight(LightEntity):
         )
         return False
 
-    def _on_disconnect(self, _client: Any) -> None:
+    def _on_disconnect(self, client: Any) -> None:
         """Called by bleak from its internal thread when the BLE link drops."""
+        # Ignore a stale callback for a client we've already replaced – it must
+        # not clobber a newer connection.
+        if self._client is not None and client is not self._client:
+            return
         _LOGGER.warning("LumiLink %s disconnected", self._address)
         self._available = False
         self._notifications_active = False
@@ -354,7 +485,9 @@ class LumiLinkLight(LightEntity):
             if not self._closing:
                 await self._connect()
 
-        self._reconnect_task = self.hass.async_create_task(_delayed_connect())
+        self._reconnect_task = self.hass.async_create_background_task(
+            _delayed_connect(), name=f"lumilink_reconnect_{self._address}"
+        )
 
     async def _disconnect(self, schedule_reconnect: bool = False) -> None:
         if not schedule_reconnect:
@@ -379,14 +512,14 @@ class LumiLinkLight(LightEntity):
         await self._connect()
         return bool(self._client and self._client.is_connected)
 
-    # ── Raw BLE write (auto-detects write type, with fallback) ────────────────
+    # ── Raw BLE I/O (auto-detects write type, with fallback) ─────────────────
 
     def _prefers_response(self, characteristic: str) -> bool:
         """Decide the write type from the characteristic's GATT properties.
 
-        Prefers Write-With-Response (as the original app does), falling back to
-        Write-Without-Response only when the characteristic doesn't support a
-        confirmed write. Cached after the first lookup.
+        Prefers Write-With-Response (the app's _sendCommandWithResponse does
+        the same), falling back to Write-Without-Response only when the
+        characteristic doesn't support a confirmed write. Cached per char.
         """
         if characteristic in self._write_with_response:
             return self._write_with_response[characteristic]
@@ -434,65 +567,217 @@ class LumiLinkLight(LightEntity):
                     exc,
                 )
 
-        _LOGGER.error("LumiLink %s: BLE write failed", self._address)
-        self._available = False
+        # Both write types failed. Tear the link down for real so the scheduled
+        # reconnect actually reconnects – otherwise, if BlueZ still reports the
+        # link "connected" (e.g. a GATT write timeout on a live link), _connect
+        # would early-return and the entity would stay unavailable forever.
+        _LOGGER.error("LumiLink %s: BLE write failed – forcing reconnect", self._address)
+        await self._disconnect(schedule_reconnect=True)
         self.async_write_ha_state()
-        self._schedule_reconnect()
         return False
 
-    # ── Colour navigation helpers ─────────────────────────────────────────────
+    async def _refresh_light_state(self) -> bool | None:
+        """Read the real on/off state from CHAR_COMMAND (bit 4 = on).
 
-    async def _goto_color(self, target: int) -> bool:
-        """Navigate to *target* colour index using NEXT steps (reset shortcut).
-
-        The module can only cycle to the *next* colour – there is no direct
-        select – so we step forward, optionally resetting to white (index 0)
-        first when that is the shorter path to a fixed colour.
+        Extracted from the app bytecode (_readLightState). Returns the state,
+        or None when the characteristic isn't readable on this firmware.
+        On the first successful read the entity stops being an assumed-state
+        light – HA then shows the true device state.
         """
-        target = target % len(COLOR_NAMES)
-        steps_forward = (target - self._color_index) % len(COLOR_NAMES)
-        steps_via_reset = target  # from white (0) → target
+        if not self._client or not self._client.is_connected:
+            return None
+        try:
+            val = await self._client.read_gatt_char(CHAR_COMMAND)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "LumiLink %s: light-state read not supported: %s",
+                self._address,
+                exc,
+            )
+            return None
+        if not val:
+            return None
+        state = bool(val[0] & LIGHT_STATE_BIT)
+        if self._attr_assumed_state:
+            self._attr_assumed_state = False
+            _LOGGER.info(
+                "LumiLink %s: state read-back works – tracking real on/off state",
+                self._address,
+            )
+        if state != self._is_on:
+            _LOGGER.debug(
+                "LumiLink %s: read-back corrected state to %s",
+                self._address,
+                "on" if state else "off",
+            )
+        self._is_on = state
+        return state
 
-        # A reset shortcut only makes sense for fixed colours (0..10); it would
-        # otherwise force the module through the visible auto modes.
-        if target < NUM_FIXED_COLORS and steps_via_reset < steps_forward:
-            await self._wait_for_feature(BUSY_BIT_RESET, max_tries=30)
-            if not await self._write(_pkt(CMD_RESET_OUTPUT, PARAM_OUTPUT_1)):
+    # ── Colour navigation (sync-anchored) ─────────────────────────────────────
+
+    async def _reset_and_wait(self) -> bool:
+        """Send RESET and wait for completion.
+
+        After a reset BOTH lamps land on white (index 0) in sync – this is the
+        hardware-verified sync anchor. The reset animation takes ~4 s (lamps
+        blink twice); the module then reports NEXT available again.
+        """
+        await self._wait_for_feature(BUSY_BIT_RESET, max_tries=30)
+        if not await self._write(_pkt(CMD_RESET_OUTPUT, PARAM_OUTPUT_1)):
+            return False
+        self._color_index = 0
+        self.async_write_ha_state()
+        await self._wait_for_new_busy_notification(max_wait=3.0)
+        await self._wait_for_feature(BUSY_BIT_NEXT, max_tries=45)
+        return True
+
+    async def _step_colors(self, steps: int, token: int) -> bool:
+        """Send *steps* NEXT pulses slowly enough for both lamps to count them."""
+        for _ in range(steps):
+            if token != self._cmd_token or self._closing:
+                _LOGGER.debug("LumiLink %s: colour transition superseded", self._address)
                 return False
-            self._color_index = 0
-            # Wait for the reset animation to finish (module reports NEXT ready).
-            await self._wait_for_feature(BUSY_BIT_NEXT, max_tries=45)
-            steps_forward = target
-
-        for _ in range(steps_forward):
             await self._wait_for_feature(BUSY_BIT_NEXT, max_tries=45)
             if not await self._write(_pkt(CMD_NEXT_COLOR, PARAM_OUTPUT_1)):
                 return False
             self._color_index = (self._color_index + 1) % len(COLOR_NAMES)
-            await asyncio.sleep(0.5)
-
+            self.async_write_ha_state()
+            # Wait for the module to confirm it processed the pulse …
+            await self._wait_for_new_busy_notification(max_wait=2.0)
+            # … then give the LAMPS time to count it. Pulses sent faster than
+            # this get occasionally missed by one lamp → colour drift.
+            await asyncio.sleep(self._step_delay)
         return True
+
+    async def _run_color_transition(self, target: int, token: int) -> None:
+        """Navigate to *target* colour index (runs as a background task)."""
+        async with self._cmd_lock:
+            if token != self._cmd_token or self._closing:
+                return
+            target = target % len(COLOR_NAMES)
+
+            if self._sync_mode:
+                # Sync anchor: RESET puts both lamps on white, then step slowly.
+                _LOGGER.info(
+                    "LumiLink %s: sync transition – reset, then %d steps to '%s'",
+                    self._address,
+                    target,
+                    COLOR_NAMES[target],
+                )
+                if not await self._reset_and_wait():
+                    return
+                if token != self._cmd_token or self._closing:
+                    return
+                await self._step_colors(target, token)
+                return
+
+            # Fast mode: step forward from the tracked index. A reset shortcut
+            # only pays off for a fixed colour when it saves enough steps to
+            # justify the visible ~4 s double-blink of the reset animation
+            # (worth roughly RESET_STEP_COST steps of time).
+            steps_forward = (target - self._color_index) % len(COLOR_NAMES)
+            if (
+                target < NUM_FIXED_COLORS
+                and target + RESET_STEP_COST < steps_forward
+            ):
+                if not await self._reset_and_wait():
+                    return
+                steps_forward = target
+            await self._step_colors(steps_forward, token)
+
+    def _start_color_transition(self, target: int) -> None:
+        """Kick off a colour transition without blocking the service call."""
+        self._cmd_token += 1
+        token = self._cmd_token
+        self._transition_task = self.hass.async_create_background_task(
+            self._run_color_transition(target, token),
+            name=f"lumilink_transition_{self._address}",
+        )
+
+    async def _cancel_transition(self) -> None:
+        """Cancel a running colour transition and wait for it to release the lock.
+
+        Bumping _cmd_token alone is not enough: the transition can be parked
+        inside a long _wait_for_feature (up to ~75 s) while holding _cmd_lock,
+        which would make a following turn_off block that entire time. Cancelling
+        the task interrupts its awaits and exits its `async with` promptly.
+        """
+        task = self._transition_task
+        self._transition_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def async_sync_lamps(self) -> None:
+        """Public: re-sync both lamps via RESET (used by the sync button)."""
+        self._cmd_token += 1
+        await self._cancel_transition()
+        token = self._cmd_token
+        async with self._cmd_lock:
+            if token != self._cmd_token:
+                return
+            _LOGGER.info("LumiLink %s: manual lamp sync (reset)", self._address)
+            await self._reset_and_wait()
 
     # ── HA service handlers ───────────────────────────────────────────────────
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        effect = kwargs.get(ATTR_EFFECT)
+        # Supersede + cancel any running transition so the lock frees quickly.
+        self._cmd_token += 1
+        await self._cancel_transition()
         async with self._cmd_lock:
-            effect = kwargs.get(ATTR_EFFECT)
-            if effect and effect in COLOR_NAMES:
-                target = COLOR_NAMES.index(effect)
-                if target != self._color_index:
-                    await self._goto_color(target)
-
             await self._wait_for_feature(BUSY_BIT_LIGHT)
             if await self._write(_pkt(CMD_TOGGLE_LIGHT, PARAM_OUTPUT_1, VALUE_LIGHT_ON)):
                 self._is_on = True
+                # Read back the real state (best-effort verification).
+                await self._wait_for_new_busy_notification(max_wait=1.5)
+                state = await self._refresh_light_state()
+                if state is False:
+                    _LOGGER.warning(
+                        "LumiLink %s: module did not confirm ON – retrying once",
+                        self._address,
+                    )
+                    await self._wait_for_feature(BUSY_BIT_LIGHT)
+                    if await self._write(
+                        _pkt(CMD_TOGGLE_LIGHT, PARAM_OUTPUT_1, VALUE_LIGHT_ON)
+                    ):
+                        await self._wait_for_new_busy_notification(max_wait=1.5)
+                        await self._refresh_light_state()
                 self.async_write_ha_state()
 
+        # Colour change runs in the background so the service returns promptly
+        # (a sync-anchored transition can take ~30 s for the last auto mode).
+        if effect and effect in COLOR_NAMES:
+            target = COLOR_NAMES.index(effect)
+            if self._sync_mode or target != self._color_index:
+                self._start_color_transition(target)
+
     async def async_turn_off(self, **kwargs: Any) -> None:
+        # Supersede + cancel any running colour transition so it can't keep the
+        # lock (a full transition can otherwise hold it for over a minute).
+        self._cmd_token += 1
+        await self._cancel_transition()
         async with self._cmd_lock:
             await self._wait_for_feature(BUSY_BIT_LIGHT)
             if await self._write(
                 _pkt(CMD_TOGGLE_LIGHT, PARAM_OUTPUT_1, VALUE_LIGHT_OFF)
             ):
                 self._is_on = False
+                await self._wait_for_new_busy_notification(max_wait=1.5)
+                state = await self._refresh_light_state()
+                if state is True:
+                    _LOGGER.warning(
+                        "LumiLink %s: module did not confirm OFF – retrying once",
+                        self._address,
+                    )
+                    await self._wait_for_feature(BUSY_BIT_LIGHT)
+                    if await self._write(
+                        _pkt(CMD_TOGGLE_LIGHT, PARAM_OUTPUT_1, VALUE_LIGHT_OFF)
+                    ):
+                        await self._wait_for_new_busy_notification(max_wait=1.5)
+                        await self._refresh_light_state()
                 self.async_write_ha_state()

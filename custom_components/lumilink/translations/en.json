@@ -20,5 +20,24 @@
       "already_configured": "This LumiLink device is already configured.",
       "no_devices_found": "No LumiLink devices could be found."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "LumiLink options",
+        "description": "Lamp-sync behaviour. Sync mode anchors every colour selection with a reset (both lamps land on white together) and then steps slowly to the target colour, so lamps wired in parallel stay in sync.",
+        "data": {
+          "sync_mode": "Sync mode (reset before every colour change)",
+          "step_delay": "Pause between colour steps (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "sync_lamps": {
+        "name": "Sync lamps"
+      }
+    }
   }
 }
